@@ -349,33 +349,49 @@ public class Application implements IApplication, Ender {
 		if (examination.startsWith("CTL") || examination.equals("UpperBounds")) {
 
 			if (examination.startsWith("CTL")) {
-				if (reader.getHLPN() != null) {
-					ReachabilitySolver.checkInInitial(reader.getHLPN(), doneProps);
-					
-					SparsePetriNet skel = reader.getHLPN().skeleton();
-					reader.setSpn(skel, true);
-					ReachabilitySolver.checkInInitial(reader.getSPN(), doneProps);
-					new AtomicReducerSR().strongReductions(solverPath, reader, doneProps);
-					reader.getSPN().simplifyLogic();
-					ReachabilitySolver.checkInInitial(reader.getSPN(), doneProps);
-					reader.rebuildSpecification(doneProps);
-					GALSolver.checkInInitial(reader.getSpec(), doneProps, reader.getSPN().isSafe());
-					reader.flattenSpec(false);
-					GALSolver.checkInInitial(reader.getSpec(), doneProps, reader.getSPN().isSafe());
-					
+				LTLPropertySolver logicSolver = new LTLPropertySolver(spotPath, solverPath, pwd, false);
+				int solved = logicSolver.preSolveForLogic(reader, doneProps, false);
+				if (solved > 0) {
+					if (reader.getSPN().getProperties().isEmpty()) {
+						return null;
+					}
 				}
-				reader.createSPN();
-				ReachabilitySolver.checkInInitial(reader.getSPN(), doneProps);
-				new AtomicReducerSR().strongReductions(solverPath, reader, doneProps);
-				reader.getSPN().simplifyLogic();
-				ReachabilitySolver.checkInInitial(reader.getSPN(), doneProps);
+				
+				
+				for (fr.lip6.move.gal.structural.Property prop : reader.getSPN().getProperties()) {
+					// try some property specific reductions
+					if (fr.lip6.move.gal.structural.expr.Simplifier.isSyntacticallyStuttering(prop)) {
+						MccTranslator reader2 = reader.copy();
+						SparsePetriNet spnProp = reader2.getSPN();
+						spnProp.getProperties().clear();
+						spnProp.getProperties().add(prop.copy());
+						StructuralReduction sr = new StructuralReduction (spnProp);
+						sr.reduce(ReductionType.SI_LTL);
+						spnProp.readFrom(sr);
+						spnProp.simplifyLogic();
+						ReachabilitySolver.checkInInitial(spnProp, doneProps);
+						if (spnProp.getProperties().isEmpty()) {
+							continue;
+						}
+						GALSolver.runGALReductions(reader2, doneProps);
+						GALSolver.checkInInitial(reader.getSpec(), doneProps, reader.getSPN().isSafe());
+						if (reader.getSpec().getProperties().isEmpty()) {
+							continue;
+						}
+						GlobalPropertySolver.verifyWithSDD(reader2, doneProps, examination, solverPath, 30);
+					}										
+				}
+				reader.getSPN().getProperties().removeIf(p -> doneProps.containsKey(p.getName()));
 				reader.rebuildSpecification(doneProps);
 				GALSolver.checkInInitial(reader.getSpec(), doneProps, reader.getSPN().isSafe());
 				reader.flattenSpec(false);
 				GALSolver.checkInInitial(reader.getSpec(), doneProps, reader.getSPN().isSafe());
-//				new AtomicReducer().strongReductions(solverPath, reader, isSafe, doneProps);
-//				Simplifier.simplify(reader.getSpec());
-
+				reader.getSPN().getProperties().removeIf(p -> doneProps.containsKey(p.getName()));
+				
+				
+				if (reader.getSPN().getProperties().isEmpty()) {
+					return null;
+				}
 				// due to + being OR in the CTL syntax, we don't support this type of props
 				// TODO: make CTL syntax match the normal predicate syntax in ITS tools
 				// reader.removeAdditionProperties();
