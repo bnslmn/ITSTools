@@ -1,5 +1,7 @@
 package fr.lip6.move.gal.application;
 
+import static fr.lip6.move.gal.structural.smt.SMTUtils.computeReducedFlow;
+
 import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -49,6 +51,8 @@ import fr.lip6.move.gal.semantics.IDeterministicNextBuilder;
 import fr.lip6.move.gal.semantics.INextBuilder;
 import fr.lip6.move.gal.structural.GlobalPropertySolvedException;
 import fr.lip6.move.gal.structural.InvariantCalculator;
+import fr.lip6.move.gal.structural.PropertyType;
+import fr.lip6.move.gal.structural.SparseHLPetriNet;
 import fr.lip6.move.gal.structural.SparsePetriNet;
 import fr.lip6.move.gal.structural.StructuralReduction;
 import fr.lip6.move.gal.structural.StructuralReduction.ReductionType;
@@ -101,7 +105,11 @@ public class Application implements IApplication, Ender {
 	private static final String TIMEOUT = "-timeout";
 	private static final String REBUILDPNML = "-rebuildPNML";
 	private static final String EXPORT_LTL = "-exportLTL";
-
+	private static final String UNFOLD = "--unfold";
+	private static final String SKELETON = "--skeleton";
+	private static final String NOSIMPLIFICATION = "--nosimplification";
+	private static final String INVARIANT = "--invariant";
+	
 	private List<IRunner> runners = new ArrayList<>();
 
 	private static Logger logger = Logger.getLogger("fr.lip6.move.gal");
@@ -173,7 +181,12 @@ public class Application implements IApplication, Ender {
 		boolean useManyOrder = false;
 		boolean rebuildPNML = false;
 		boolean exportLTL = false;
-
+		boolean unfold =false;
+		boolean skeleton =false;
+		boolean nosimplifications = false;
+		boolean invariants = false;
+		
+		
 		long timeout = 3600;
 
 		for (int i = 0; i < args.length; i++) {
@@ -219,6 +232,15 @@ public class Application implements IApplication, Ender {
 				doHierarchy = false;
 			} else if (MANYORDER.equals(args[i])) {
 				useManyOrder = true;
+			} else if (UNFOLD.equals(args[i])) {
+				unfold = true;
+			} else if (INVARIANT.equals(args[i])) {
+				invariants = true;
+			} else if (SKELETON.equals(args[i])) {
+				unfold = true;
+				skeleton = true;
+			} else if (NOSIMPLIFICATION.equals(args[i])) {
+				nosimplifications = true;
 			} else if (EXPORT_LTL.equals(args[i])) {
 				exportLTL = true;
 			}
@@ -265,6 +287,23 @@ public class Application implements IApplication, Ender {
 			return null;
 		}
 
+		if (invariants) {
+			reader.createSPN();
+			List<Integer> tnames = new ArrayList<>();
+			List<Integer> repr = new ArrayList<>();
+			IntMatrixCol sumMatrix = computeReducedFlow(reader.getSPN(), tnames, repr);
+			SparsePetriNet spn = reader.getSPN();
+			Set<SparseIntArray> invar = InvariantCalculator.computePInvariants(sumMatrix, reader.getSPN().getPnames());		
+			InvariantCalculator.printInvariant(invar, spn.getPnames(), reader.getSPN().getMarks());
+			
+			Set<SparseIntArray> invarT = DeadlockTester.computeTinvariants(reader.getSPN(), sumMatrix, tnames);
+			List<Integer> empty = new ArrayList<>(tnames.size());
+			for (int i=0 ; i < tnames.size(); i++) empty.add(0);
+			List<String> strtnames = repr.stream().map(id -> spn.getTnames().get(id)).collect(Collectors.toList());
+			InvariantCalculator.printInvariant(invarT, strtnames, empty );
+			return null;
+		}
+		
 		// for debug and control COL files are small, otherwise 1MB PNML limit (i.e.
 		// roughly 200kB GAL max).
 		if (pwd.contains("COL") || new File(pwd + "/model.pnml").length() < 1000000) {
@@ -283,6 +322,7 @@ public class Application implements IApplication, Ender {
 
 		}
 
+		
 
 		// initialize a shared container to detect help detect termination in portfolio
 		// case
@@ -345,6 +385,40 @@ public class Application implements IApplication, Ender {
 		// uses a SAX parser to load to Logic MM, then an M2M to GAL properties.
 		reader.loadProperties();
 
+		if (unfold) {
+			SparsePetriNet spn;
+			if (nosimplifications) {
+				if (reader.getHLPN() != null) {
+					SparseHLPetriNet hlpn = reader.getHLPN();
+					hlpn.simplifyLogic();
+					if (skeleton) {
+						spn = hlpn.skeleton();
+					} else {
+						spn = hlpn.unfold();
+					}
+				} else {
+					spn = reader.getSPN();
+				}
+			} else {
+				reader.createSPN();
+				// includes syntactic simplifications
+				spn = reader.getSPN();
+			}
+			String outform = pwd + "/" + examination + ".sr.xml";
+			boolean usesConstants = PropertiesToPNML.transform(reader.getSPN(), outform, doneProps);
+			if (usesConstants) {
+				// we exported constants to a place with index = current place count
+				// to be consistent now add a trivially constant place with initial marking 1
+				// token
+				System.out.println("Added a place called one to the net.");
+				spn.addPlace("one", 1);
+			}
+			String outsr = pwd + "/model.sr.pnml";
+			StructuralToPNML.transform(spn, outsr);
+			
+			return null;
+		}
+		
 		// are we going for CTL ? only ITSRunner answers this.
 		if (examination.startsWith("CTL") || examination.equals("UpperBounds")) {
 
@@ -374,9 +448,21 @@ public class Application implements IApplication, Ender {
 							continue;
 						}
 						GALSolver.runGALReductions(reader2, doneProps);
-						GALSolver.checkInInitial(reader.getSpec(), doneProps, reader.getSPN().isSafe());
-						if (reader.getSpec().getProperties().isEmpty()) {
+						GALSolver.checkInInitial(reader2.getSpec(), doneProps, reader2.getSPN().isSafe());
+						if (reader2.getSpec().getProperties().isEmpty()) {
 							continue;
+						}
+						fr.lip6.move.gal.structural.Property propRed = spnProp.getProperties().get(0);
+						if (fr.lip6.move.gal.structural.expr.Simplifier.isAnInvariant(propRed)) {
+							// requalify
+							propRed.setType(PropertyType.INVARIANT);
+							// solve with reachability
+							ReachabilitySolver.applyReductions(reader2, doneProps, solverPath);														
+							
+							if (reader2.getSPN().getProperties().isEmpty()) {
+								continue;
+							}
+							propRed.setType(PropertyType.CTL);
 						}
 						GlobalPropertySolver.verifyWithSDD(reader2, doneProps, examination, solverPath, 30);
 					}										
